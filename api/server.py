@@ -418,18 +418,11 @@ def portfolio(body: PortfolioBody):
     }
 
 
-@app.get("/live")
-@app.get("/live/positions")
-def live_positions():
-    """
-    READ-ONLY live view. Returns current Alpaca paper positions (if keys are
-    configured) plus today's signal per tracked stock. NEVER submits or closes
-    an order — that stays in live_controller.py.
-    """
-    profiles = load_profiles()
-    positions, owned = [], {}
+NOTIONAL_ALLOCATION = 5000.0  # matches live_controller.py
 
-    # 1. Alpaca positions (best-effort; missing keys -> empty, still 200)
+
+def _alpaca_client():
+    """Build a paper TradingClient, or None if keys are missing/unavailable."""
     try:
         from dotenv import load_dotenv
         load_dotenv()
@@ -437,23 +430,72 @@ def live_positions():
         api_key = os.getenv("ALPACA_API_KEY")
         secret = os.getenv("ALPACA_SECRET_KEY")
         if api_key and secret:
-            client = TradingClient(api_key, secret, paper=True)
-            for pos in client.get_all_positions():
-                owned[pos.symbol] = pos
-                positions.append({
-                    "symbol": pos.symbol,
-                    "qty": _clean(float(pos.qty)),
-                    "avg_entry": _clean(round(float(pos.avg_entry_price), 2)),
-                    "current_price": _clean(round(float(pos.current_price), 2)),
-                    "market_value": _clean(round(float(pos.market_value), 2)),
-                    "unrealized_pl": _clean(round(float(pos.unrealized_pl), 2)),
-                    "unrealized_pl_pct": _clean(round(float(pos.unrealized_plpc) * 100, 2)),
-                })
+            return TradingClient(api_key, secret, paper=True)
     except Exception as e:
-        # Surface the reason but keep the endpoint healthy for the UI.
-        print(f"[live] Alpaca unavailable: {e}")
+        print(f"[live] Alpaca client init failed: {e}")
+    return None
 
-    # 2. Per-stock signal classification (read-only, mirrors live_controller logic)
+
+def _alpaca_positions(client):
+    """(positions list, owned dict). Read-only."""
+    positions, owned = [], {}
+    if client is None:
+        return positions, owned
+    try:
+        for pos in client.get_all_positions():
+            owned[pos.symbol] = pos
+            positions.append({
+                "symbol": pos.symbol,
+                "qty": _clean(float(pos.qty)),
+                "avg_entry": _clean(round(float(pos.avg_entry_price), 2)),
+                "current_price": _clean(round(float(pos.current_price), 2)),
+                "market_value": _clean(round(float(pos.market_value), 2)),
+                "unrealized_pl": _clean(round(float(pos.unrealized_pl), 2)),
+                "unrealized_pl_pct": _clean(round(float(pos.unrealized_plpc) * 100, 2)),
+            })
+    except Exception as e:
+        print(f"[live] positions fetch failed: {e}")
+    return positions, owned
+
+
+def _alpaca_activity(client, limit=25):
+    """Recent REAL order history for the activity feed. Read-only — never trades."""
+    activity = []
+    if client is None:
+        return activity
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        orders = client.get_orders(
+            filter=GetOrdersRequest(status=QueryOrderStatus.ALL, limit=limit))
+        for o in orders:
+            side = getattr(o.side, "value", str(o.side)).upper()
+            status = getattr(o.status, "value", str(o.status))
+            ts = o.filled_at or o.submitted_at
+            qty = o.filled_qty or o.qty
+            price = o.filled_avg_price
+            emoji = "🚀" if side == "BUY" else "🛑"
+            if price:
+                msg = f"{emoji} {side} {qty} {o.symbol} @ ${float(price):,.2f} · {status}"
+            else:
+                msg = f"{emoji} {side} {o.symbol} · {status}"
+            activity.append({
+                "ts": ts.isoformat() if ts else None,
+                "symbol": o.symbol,
+                "side": side,
+                "qty": _clean(float(qty)) if qty else None,
+                "price": _clean(round(float(price), 2)) if price else None,
+                "status": status,
+                "message": msg,
+            })
+    except Exception as e:
+        print(f"[live] activity fetch failed: {e}")
+    return activity
+
+
+def _compute_signals(owned):
+    """Today's signal per tracked stock (read-only, mirrors live_controller logic)."""
+    profiles = load_profiles()
     signals = []
     for ticker, rules in profiles.items():
         if is_stale(ticker):
@@ -501,10 +543,72 @@ def live_positions():
         except Exception as e:
             print(f"[live] signal calc failed for {ticker}: {e}")
             continue
+    return signals
 
+
+@app.get("/live")
+@app.get("/live/positions")
+def live_positions():
+    """
+    READ-ONLY live view: current Alpaca paper positions, today's signals, and
+    the real recent-order activity feed. NEVER submits or closes an order.
+    """
+    client = _alpaca_client()
+    positions, owned = _alpaca_positions(client)
+    signals = _compute_signals(owned)
+    activity = _alpaca_activity(client)
     return {
         "mode": "paper",
-        "notional_allocation": 5000.0,
+        "notional_allocation": NOTIONAL_ALLOCATION,
         "positions": positions,
         "signals": signals,
+        "activity": activity,
+    }
+
+
+@app.get("/live/dry-run")
+@app.post("/live/run")
+def live_dry_run():
+    """
+    PREVIEW what the live pipeline WOULD do right now, given current positions
+    and signals. Submits NOTHING, posts to NO webhook. 100% read-only — safe to
+    expose publicly. Real execution stays in live_controller.py (run manually).
+    """
+    client = _alpaca_client()
+    _, owned = _alpaca_positions(client)
+    signals = _compute_signals(owned)
+
+    actions = []
+    for s in signals:
+        st, t, pl = s["signal"], s["ticker"], s.get("pl_pct")
+        pl_str = f" (P/L {pl:+.2f}%)" if pl is not None else ""
+        if st == "BUY":
+            would, msg = True, f"🚀 Would BUY ${NOTIONAL_ALLOCATION:,.0f} of {t} — fresh entry signal"
+        elif st == "SELL":
+            would, msg = True, f"🛑 Would SELL / liquidate {t}{pl_str} — trend broke"
+        elif st == "HOLDING":
+            would, msg = False, f"⏳ Would hold {t}{pl_str}"
+        elif st == "MISSED_DIP":
+            would, msg = False, f"⏳ {t}: trend up but missed the RSI dip — waiting for reset"
+        elif st == "STALE":
+            would, msg = False, f"⚠️ {t}: profile stale — would skip"
+        else:  # WAITING
+            would, msg = False, f"⏳ {t}: waiting — trend negative or RSI too high"
+        actions.append({
+            "ticker": t, "action": st, "would_execute": would, "message": msg,
+            "price": s.get("price"), "rsi": s.get("rsi"), "pl_pct": pl,
+        })
+
+    return {
+        "dry_run": True,
+        "generated_at": datetime.now().isoformat(),
+        "notional_allocation": NOTIONAL_ALLOCATION,
+        "summary": {
+            "would_buy": sum(1 for a in actions if a["action"] == "BUY"),
+            "would_sell": sum(1 for a in actions if a["action"] == "SELL"),
+            "holding": sum(1 for a in actions if a["action"] == "HOLDING"),
+            "waiting": sum(1 for a in actions if a["action"] in ("WAITING", "MISSED_DIP")),
+            "total": len(actions),
+        },
+        "actions": actions,
     }
