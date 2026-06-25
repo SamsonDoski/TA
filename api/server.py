@@ -359,7 +359,11 @@ def portfolio(body: PortfolioBody):
     sim = PortfolioSimulator(
         tickers=tickers, start_date=body.start, end_date=body.end,
         initial_equity=body.equity, profile=body.profile, strategy=body.strategy)
-    df_port = sim.run_simulation()
+    try:
+        df_port = sim.run_simulation()
+    except Exception as e:
+        # e.g. pd.concat on empty list when every ticker's data fetch failed.
+        raise HTTPException(502, f"No price data available for {tickers}: {e}")
     if df_port.empty or "Portfolio_Equity" not in df_port.columns:
         raise HTTPException(404, "Simulation produced no data for the given tickers/range.")
 

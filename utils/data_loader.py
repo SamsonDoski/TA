@@ -27,10 +27,15 @@ def fetch_data(ticker, start="2020-01-01", end="2026-03-30", force_download=Fals
         print(f"🌐 Downloading MASTER historical data for {ticker}...")
         try:
             data = yf.download(ticker, period="max", auto_adjust=True)
-            
+
+            # Don't let a blocked/empty download (common from cloud IPs) clobber
+            # a good local cache — fall through to the stale-data path instead.
+            if data is None or data.empty:
+                raise RuntimeError("yfinance returned no data (host may be rate-limited/blocked)")
+
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.droplevel(1)
-                
+
             data.index.name = "Date"
             data.to_csv(filename)
             print(f"✅ Master cache built for {ticker} ({len(data)} rows).")
