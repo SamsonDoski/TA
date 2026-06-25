@@ -1,0 +1,13 @@
+# Keep the build context small and the image clean.
+venv/
+**/__pycache__/
+*.pyc
+*.log
+.git/
+.github/
+.env
+results/
+docs/
+notes version control/
+*.md
+v3_*.py

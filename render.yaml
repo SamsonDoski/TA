@@ -1,0 +1,21 @@
+# Render Blueprint — one-click deploy of the Quant Desk API.
+# In Render: New + > Blueprint, point at this repo. Secrets (sync:false)
+# are entered in the dashboard, never committed.
+services:
+  - type: web
+    name: quant-desk-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: ALPACA_BASE_URL
+        sync: false
+      # Lock CORS to your published front-end (comma-separated for multiple).
+      - key: FRONTEND_ORIGINS
+        value: https://strategy-suite-dash.lovable.app
