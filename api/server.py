@@ -467,7 +467,8 @@ def live_positions():
         try:
             end = datetime.now().strftime("%Y-%m-%d")
             start = (datetime.now() - timedelta(days=(long_ma * 2) + 365)).strftime("%Y-%m-%d")
-            df = fetch_data(ticker, start, end)
+            # Cached-only: the live view must be fast; never trigger 24 downloads.
+            df = fetch_data(ticker, start, end, allow_download=False)
             if df.empty or len(df) < 3:
                 continue
             df = apply_combo_strategy(df, short_window=short_ma,

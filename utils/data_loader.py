@@ -4,13 +4,22 @@ import yfinance as yf
 
 DATA_DIR = "data"
 
-def fetch_data(ticker, start="2020-01-01", end="2026-03-30", force_download=False):
+def fetch_data(ticker, start="2020-01-01", end="2026-03-30", force_download=False, allow_download=True):
     os.makedirs(DATA_DIR, exist_ok=True)
     filename = f"{DATA_DIR}/{ticker}.csv"
-    
+
     needs_update = False
     requested_end_date = pd.to_datetime(end)
-    
+
+    # Offline mode: serve whatever is cached and never hit the network. Used by
+    # latency-sensitive paths (e.g. the live dashboard) so they don't stall on
+    # 24 sequential Yahoo downloads when the cache looks a day stale.
+    if not allow_download:
+        if not os.path.exists(filename):
+            return pd.DataFrame()
+        df = pd.read_csv(filename, index_col=0, parse_dates=True)
+        return df.loc[pd.to_datetime(start):requested_end_date]
+
     # 1. THE STALE DATA DETECTOR
     if os.path.exists(filename) and not force_download:
         # Quickly peek at the file to see how old it is
