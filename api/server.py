@@ -57,10 +57,15 @@ app = FastAPI(title="Quant Desk API", version="1.0.0")
 
 # Allow the Lovable front-end (different origin) to call us. Tighten
 # allow_origins to your deployed front-end URL in production.
-ALLOWED = os.getenv("FRONTEND_ORIGINS", "*").split(",")
+ALLOWED = [o for o in os.getenv("FRONTEND_ORIGINS", "*").split(",") if o]
+# Lovable serves the published app on *.lovable.app and previews on
+# *.lovableproject.com. Starlette's allow_origins does exact matches only, so
+# wildcard subdomains must go through allow_origin_regex.
+LOVABLE_ORIGIN_REGEX = r"https://([a-z0-9-]+\.)*(lovable\.app|lovableproject\.com)"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED,
+    allow_origin_regex=LOVABLE_ORIGIN_REGEX,
     allow_methods=["*"],
     allow_headers=["*"],
 )
