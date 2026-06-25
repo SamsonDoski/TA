@@ -259,6 +259,19 @@ def get_backtest(
     }
 
 
+@app.get("/optimize")
+def optimize_get(
+    ticker: str,
+    start: str = Query("2020-01-01"),
+    end: str = Query("2024-01-01"),
+    strategy: str = Query("Combo"),
+    equity: float = Query(10000.0),
+):
+    """GET variant of the grid search (uses the default sweep ranges)."""
+    return optimize(OptimizeBody(
+        ticker=ticker, start=start, end=end, strategy=strategy, equity=equity))
+
+
 @app.post("/optimize")
 def optimize(body: OptimizeBody):
     """
@@ -318,6 +331,25 @@ def optimize(body: OptimizeBody):
     grid.sort(key=lambda x: x["return_pct"], reverse=True)
     best = {"short": grid[0]["short"], "long": grid[0]["long"]}
     return {"ticker": ticker, "strategy": body.strategy, "grid": grid, "best": best}
+
+
+DEFAULT_PORTFOLIO_TICKERS = "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,NFLX"
+
+
+@app.get("/portfolio")
+def portfolio_get(
+    tickers: str = Query(DEFAULT_PORTFOLIO_TICKERS),
+    start: str = Query("2020-01-01"),
+    end: str = Query("2024-01-01"),
+    equity: float = Query(100000.0),
+    strategy: str = Query("Combo"),
+    profile: str = Query("Swing"),
+):
+    """GET variant so the dashboard can load the portfolio without a POST body."""
+    tlist = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    return portfolio(PortfolioBody(
+        tickers=tlist, start=start, end=end,
+        equity=equity, strategy=strategy, profile=profile))
 
 
 @app.post("/portfolio")
@@ -382,6 +414,7 @@ def portfolio(body: PortfolioBody):
     }
 
 
+@app.get("/live")
 @app.get("/live/positions")
 def live_positions():
     """
