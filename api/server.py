@@ -264,12 +264,12 @@ def stock_detail(
     ticker: str,
     start: str = Query(None),
     end: str = Query(None),
-    equity: float = Query(10000.0),
 ):
     """
-    Per-ticker "bot thought process" view. Plots price + the stock's OWN optimized
-    moving averages (from memory/stock_profile.json — the exact windows the live bot
-    trades on) + RSI, with the buy/sell signals the bot acts on. Read-only, cached data.
+    Per-ticker "bot thought process" view: price + the stock's OWN optimized moving
+    averages + RSI, with the actual buy/sell signals the live bot acts on. Read-only,
+    cached data. This returns PRICE/SIGNAL data only — NO simulated capital P/L (that's
+    /backtest's job). Loads ~2 years (pannable) but flags a default zoom to this year.
     """
     ticker = ticker.upper()
     profiles = load_profiles()
@@ -278,9 +278,13 @@ def stock_detail(
     long_ma = rules.get("best_long_window") or 100
     rsi_period = rules.get("rsi_period", 14)
 
-    end = end or datetime.now().strftime("%Y-%m-%d")
-    start = start or (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
-    requested_start = datetime.strptime(start, "%Y-%m-%d")
+    now = datetime.now()
+    end = end or now.strftime("%Y-%m-%d")
+    # Loaded/pannable range (~2 years); default visible zoom starts this calendar year.
+    data_start = start or (now - timedelta(days=730)).strftime("%Y-%m-%d")
+    default_view_start = max(f"{now.year}-01-01", data_start)
+
+    requested_start = datetime.strptime(data_start, "%Y-%m-%d")
     fetch_start = (requested_start - timedelta(days=BUFFER_DAYS)).strftime("%Y-%m-%d")
 
     df = fetch_data(ticker, start=fetch_start, end=end, allow_download=False)
@@ -288,23 +292,43 @@ def stock_detail(
         raise HTTPException(404, f"No cached data for {ticker}.")
 
     # Same call shape the live bot uses (combo defaults for overbought/oversold/stop).
+    # No ghost-trade wipe here: we want the TRUE signal state, so a stock entered before
+    # the window correctly shows as "holding" rather than being reset to flat.
     df = apply_combo_strategy(df, short_window=short_ma, long_window=long_ma, rsi_window=rsi_period)
     df["Buy_Trigger"] = (df["Signal"] == 1) & (df["Signal"].shift(1) == 0)
-    df_win = df.loc[start:end].copy()
+    df_win = df.loc[data_start:end].copy()
     if df_win.empty:
-        raise HTTPException(404, f"No rows for {ticker} in {start}..{end}.")
-    df_win.loc[df_win["Buy_Trigger"].cumsum() == 0, "Signal"] = 0
+        raise HTTPException(404, f"No rows for {ticker} in {data_start}..{end}.")
 
-    engine = BacktestEngine(initial_equity=equity)
-    df_bt = engine.run(df_win)
-
-    cols = ["Close", "MA_short", "MA_long", "RSI", "Signal", "Buy_Trigger", "Equity"]
+    cols = ["Close", "MA_short", "MA_long", "RSI", "Signal", "Buy_Trigger"]
     rows = []
-    for ts, row in df_bt.iterrows():
+    for ts, row in df_win.iterrows():
         r = {"date": str(pd.Timestamp(ts).date())}
         for c in cols:
-            r[c] = _clean(row[c]) if c in df_bt.columns else None
+            r[c] = _clean(row[c]) if c in df_win.columns else None
         rows.append(r)
+
+    # Signal round-trips that ENTERED within the window (fresh Buy_Trigger -> next exit).
+    # Positions entered earlier show as "holding" via the Signal line, not a fake trade.
+    trades = []
+    closes = df_win["Close"].values
+    sig = df_win["Signal"].values
+    bt = df_win["Buy_Trigger"].values
+    idx = df_win.index
+    entry_i = None
+    for i in range(len(df_win)):
+        if bt[i]:
+            entry_i = i
+        elif entry_i is not None and sig[i] == 0 and sig[i - 1] == 1:
+            ep, xp = float(closes[entry_i]), float(closes[i])
+            trades.append({
+                "entry_date": str(pd.Timestamp(idx[entry_i]).date()),
+                "exit_date": str(pd.Timestamp(idx[i]).date()),
+                "entry_price": round(ep, 2), "exit_price": round(xp, 2),
+                "pl_pct": round((xp - ep) / ep * 100, 2) if ep else None,
+                "holding_days": int((pd.Timestamp(idx[i]) - pd.Timestamp(idx[entry_i])).days),
+            })
+            entry_i = None
 
     return {
         "ticker": ticker,
@@ -315,9 +339,10 @@ def stock_detail(
         "rsi_period": rsi_period,
         "last_optimized": rules.get("last_optimized"),
         "current_signal": rows[-1]["Signal"] if rows else None,
+        "window": {"start": data_start, "end": end},
+        "default_view": {"start": default_view_start, "end": end},
         "rows": rows,
-        "trades": _trade_log(df_bt),
-        "summary": _metrics(engine, df_bt),
+        "trades": trades,
     }
 
 
