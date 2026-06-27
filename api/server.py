@@ -259,6 +259,68 @@ def get_backtest(
     }
 
 
+@app.get("/stock/{ticker}")
+def stock_detail(
+    ticker: str,
+    start: str = Query(None),
+    end: str = Query(None),
+    equity: float = Query(10000.0),
+):
+    """
+    Per-ticker "bot thought process" view. Plots price + the stock's OWN optimized
+    moving averages (from memory/stock_profile.json — the exact windows the live bot
+    trades on) + RSI, with the buy/sell signals the bot acts on. Read-only, cached data.
+    """
+    ticker = ticker.upper()
+    profiles = load_profiles()
+    rules = profiles.get(ticker, {})
+    short_ma = rules.get("best_short_window") or 50
+    long_ma = rules.get("best_long_window") or 100
+    rsi_period = rules.get("rsi_period", 14)
+
+    end = end or datetime.now().strftime("%Y-%m-%d")
+    start = start or (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+    requested_start = datetime.strptime(start, "%Y-%m-%d")
+    fetch_start = (requested_start - timedelta(days=BUFFER_DAYS)).strftime("%Y-%m-%d")
+
+    df = fetch_data(ticker, start=fetch_start, end=end, allow_download=False)
+    if df.empty:
+        raise HTTPException(404, f"No cached data for {ticker}.")
+
+    # Same call shape the live bot uses (combo defaults for overbought/oversold/stop).
+    df = apply_combo_strategy(df, short_window=short_ma, long_window=long_ma, rsi_window=rsi_period)
+    df["Buy_Trigger"] = (df["Signal"] == 1) & (df["Signal"].shift(1) == 0)
+    df_win = df.loc[start:end].copy()
+    if df_win.empty:
+        raise HTTPException(404, f"No rows for {ticker} in {start}..{end}.")
+    df_win.loc[df_win["Buy_Trigger"].cumsum() == 0, "Signal"] = 0
+
+    engine = BacktestEngine(initial_equity=equity)
+    df_bt = engine.run(df_win)
+
+    cols = ["Close", "MA_short", "MA_long", "RSI", "Signal", "Buy_Trigger", "Equity"]
+    rows = []
+    for ts, row in df_bt.iterrows():
+        r = {"date": str(pd.Timestamp(ts).date())}
+        for c in cols:
+            r[c] = _clean(row[c]) if c in df_bt.columns else None
+        rows.append(r)
+
+    return {
+        "ticker": ticker,
+        "strategy": "Combo",
+        "optimized": ticker in profiles,
+        "short_window": short_ma,
+        "long_window": long_ma,
+        "rsi_period": rsi_period,
+        "last_optimized": rules.get("last_optimized"),
+        "current_signal": rows[-1]["Signal"] if rows else None,
+        "rows": rows,
+        "trades": _trade_log(df_bt),
+        "summary": _metrics(engine, df_bt),
+    }
+
+
 @app.get("/optimize")
 def optimize_get(
     ticker: str,
